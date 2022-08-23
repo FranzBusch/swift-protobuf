@@ -11,8 +11,6 @@
 # make regenerate
 #   Recompile all the necessary protos
 #   (requires protoc in path)
-# make test-xcode[-NAME]:
-#   Runs the tests in the Xcode project in the requested mode(s).
 #
 # Caution: 'test' does not 'regenerate', so if you've made changes to the code
 # generation, you'll need to do more than just 'test':
@@ -59,10 +57,10 @@ GENERATE_SRCS=${GENERATE_SRCS_BASE} -I Protos --experimental_allow_proto3_option
 # Where to find the Swift conformance test runner executable.
 SWIFT_CONFORMANCE_PLUGIN=.build/debug/Conformance
 
-# If you have already build conformance-test-runner in
-# a nearby directory, just set the full path here and
-# we'll use it instead.
-CONFORMANCE_HOST=${GOOGLE_PROTOBUF_CHECKOUT}/conformance/conformance-test-runner
+# Where to find the conformance-test-runner. Defaults to being in your protobuf
+# checkout. Invoke make with CONFORMANCE_TEST_RUNNER=[PATH_TO_BINARY] to
+# override this value.
+CONFORMANCE_TEST_RUNNER?=${GOOGLE_PROTOBUF_CHECKOUT}/conformance/conformance-test-runner
 
 # NOTE: TEST_PROTOS, LIBRARY_PROTOS, and PLUGIN_PROTOS are all full paths so
 # eventually we might be able to do proper dependencies and use them as inputs
@@ -171,29 +169,6 @@ SWIFT_DESCRIPTOR_TEST_PROTOS= \
 	Protos/pluginlib_descriptor_test2.proto \
 	${PLUGIN_PROTOS}
 
-XCODEBUILD_EXTRAS =
-# Invoke make with XCODE_SKIP_OPTIMIZER=1 to suppress the optimizer when
-# building the Xcode projects. For Release builds, this is a non trivial speed
-# up for compilation
-XCODE_SKIP_OPTIMIZER=0
-ifeq "$(XCODE_SKIP_OPTIMIZER)" "1"
-  XCODEBUILD_EXTRAS += SWIFT_OPTIMIZATION_LEVEL=-Onone
-endif
-
-# Invoke make with XCODE_ANALYZE=1 to enable the analyzer while building the
-# Xcode projects.
-XCODE_ANALYZE=0
-ifeq "$(XCODE_ANALYZE)" "1"
-  XCODEBUILD_EXTRAS += RUN_CLANG_STATIC_ANALYZER=YES CLANG_STATIC_ANALYZER_MODE=deep
-endif
-
-# Invoke make with XCODE_NOISY to get the default output of everything little
-# thing Xcode does.
-XCODE_NOISY=0
-ifeq "$(XCODE_NOISY)" "0"
-  XCODEBUILD_EXTRAS += -quiet
-endif
-
 .PHONY: \
 	all \
 	build \
@@ -202,7 +177,6 @@ endif
 	check-proto-files \
 	check-version-numbers \
 	clean \
-	conformance-host \
 	default \
 	docs \
 	install \
@@ -218,49 +192,24 @@ endif
 	test-everything \
 	test-plugin \
 	test-runtime \
-	test-xcode \
-	test-xcode-debug \
-	test-xcode-release \
-	test-xcode-iOS \
-	test-xcode-iOS-debug \
-	test-xcode-iOS-release \
-	test-xcode-macOS \
-	test-xcode-macOS-debug \
-	test-xcode-macOS-release \
-	test-xcode-tvOS \
-	test-xcode-tvOS-debug \
-	test-xcode-tvOS-release \
-	test-xcode-watchOS \
-	test-xcode-watchOS-debug \
-	test-xcode-watchOS-release \
 	update-proto-files
-
-.NOTPARALLEL: \
-	test-xcode-iOS-debug \
-	test-xcode-iOS-release \
-	test-xcode-macOS-debug \
-	test-xcode-macOS-release \
-	test-xcode-tvOS-debug \
-	test-xcode-tvOS-release \
-	test-xcode-watchOS-debug \
-	test-xcode-watchOS-release
 
 default: build
 
 all: build
 
-# This also rebuilds LinuxMain.swift to include all of the test cases.
-# (The awk script is very fast, so re-running it on every build is reasonable,
-#  but we only update the file when it changes to avoid extra builds.)
-# (Someday, 'swift test' will learn how to auto-discover test cases on Linux,
-# at which time this will no longer be needed.)
-build:
+# This generates a LinuxMain.swift to include all of the test cases.
+# It is needed for all builds before 5.4.x
+generate-linux-main:
 	@${AWK} -f DevTools/CollectTests.awk Tests/*/Test_*.swift > Tests/LinuxMain.swift.new
 	@if ! cmp -s Tests/LinuxMain.swift.new Tests/LinuxMain.swift; then \
 		cp Tests/LinuxMain.swift.new Tests/LinuxMain.swift; \
 		echo "FYI: Tests/LinuxMain.swift Updated"; \
 	fi
 	@rm Tests/LinuxMain.swift.new
+
+# Builds all the targets of the package.
+build:
 	${SWIFT} build
 
 # Anything that needs the plugin should do a build.
@@ -294,8 +243,8 @@ docs:
 #
 check test: build test-runtime test-plugin test-conformance check-version-numbers
 
-# Test everything (runtime, plugin, xcode project)
-test-all test-everything: test test-xcode
+# Test everything (runtime, plugin)
+test-all test-everything: test
 
 # Check the version numbers are all in sync.
 check-version-numbers:
@@ -556,100 +505,9 @@ check-proto-files: check-for-protobuf-checkout
 	done
 
 # Runs the conformance tests.
-test-conformance: build check-for-protobuf-checkout $(CONFORMANCE_HOST) Sources/Conformance/failure_list_swift.txt Sources/Conformance/text_format_failure_list_swift.txt
-	( \
-		ABS_PBDIR=`cd ${GOOGLE_PROTOBUF_CHECKOUT}; pwd`; \
-		$${ABS_PBDIR}/conformance/conformance-test-runner \
-		  --enforce_recommended \
-		  --failure_list Sources/Conformance/failure_list_swift.txt \
-		  --text_format_failure_list Sources/Conformance/text_format_failure_list_swift.txt\
-		  $(SWIFT_CONFORMANCE_PLUGIN); \
-	)
-
-# The 'conformance-host' program is part of the protobuf project.
-# It generates test cases, feeds them to our plugin, and verifies the results:
-conformance-host $(CONFORMANCE_HOST): check-for-protobuf-checkout
-	@if [ ! -f "${GOOGLE_PROTOBUF_CHECKOUT}/Makefile" ]; then \
-		echo "No Makefile, running autogen.sh and configure." ; \
-		( cd ${GOOGLE_PROTOBUF_CHECKOUT} && \
-		  ./autogen.sh && \
-		  ./configure ) \
-	fi
-	$(MAKE) -C ${GOOGLE_PROTOBUF_CHECKOUT}/src
-	$(MAKE) -C ${GOOGLE_PROTOBUF_CHECKOUT}/conformance
-
-
-# Helpers to put the Xcode project through all modes.
-
-# Grouping targets
-test-xcode: test-xcode-iOS test-xcode-macOS test-xcode-tvOS test-xcode-watchOS
-test-xcode-iOS: test-xcode-iOS-debug test-xcode-iOS-release
-test-xcode-macOS: test-xcode-macOS-debug test-xcode-macOS-release
-test-xcode-tvOS: test-xcode-tvOS-debug test-xcode-tvOS-release
-test-xcode-watchOS: test-xcode-watchOS-debug test-xcode-watchOS-release
-test-xcode-debug: test-xcode-iOS-debug test-xcode-macOS-debug test-xcode-tvOS-debug test-xcode-watchOS-debug
-test-xcode-release: test-xcode-iOS-release test-xcode-macOS-release test-xcode-tvOS-release test-xcode-watchOS-release
-
-# The individual ones
-
-test-xcode-iOS-debug:
-	xcodebuild -project SwiftProtobuf.xcodeproj \
-		-scheme SwiftProtobuf_iOS \
-		-configuration Debug \
-		-destination "platform=iOS Simulator,name=iPhone 8,OS=latest" \
-		-disable-concurrent-destination-testing \
-		test $(XCODEBUILD_EXTRAS)
-
-# Release defaults to not supporting testing, so add ENABLE_TESTABILITY=YES
-# to ensure the main library gets testing support.
-test-xcode-iOS-release:
-	xcodebuild -project SwiftProtobuf.xcodeproj \
-		-scheme SwiftProtobuf_iOS \
-		-configuration Release \
-		-destination "platform=iOS Simulator,name=iPhone 8,OS=latest" \
-		-disable-concurrent-destination-testing \
-		test ENABLE_TESTABILITY=YES $(XCODEBUILD_EXTRAS)
-
-test-xcode-macOS-debug:
-	xcodebuild -project SwiftProtobuf.xcodeproj \
-		-scheme SwiftProtobuf_macOS \
-		-configuration Debug \
-		build test $(XCODEBUILD_EXTRAS)
-
-# Release defaults to not supporting testing, so add ENABLE_TESTABILITY=YES
-# to ensure the main library gets testing support.
-test-xcode-macOS-release:
-	xcodebuild -project SwiftProtobuf.xcodeproj \
-		-scheme SwiftProtobuf_macOS \
-		-configuration Release \
-		build test ENABLE_TESTABILITY=YES $(XCODEBUILD_EXTRAS)
-
-test-xcode-tvOS-debug:
-	xcodebuild -project SwiftProtobuf.xcodeproj \
-		-scheme SwiftProtobuf_tvOS \
-		-configuration Debug \
-		-destination "platform=tvOS Simulator,name=Apple TV,OS=latest" \
-		build test $(XCODEBUILD_EXTRAS)
-
-# Release defaults to not supporting testing, so add ENABLE_TESTABILITY=YES
-# to ensure the main library gets testing support.
-test-xcode-tvOS-release:
-	xcodebuild -project SwiftProtobuf.xcodeproj \
-		-scheme SwiftProtobuf_tvOS \
-		-configuration Release \
-		-destination "platform=tvOS Simulator,name=Apple TV,OS=latest" \
-		build test ENABLE_TESTABILITY=YES $(XCODEBUILD_EXTRAS)
-
-# watchOS doesn't support tests, just do a build.
-test-xcode-watchOS-debug:
-	xcodebuild -project SwiftProtobuf.xcodeproj \
-		-scheme SwiftProtobuf_watchOS \
-		-configuration Debug \
-		build $(XCODEBUILD_EXTRAS)
-
-# watchOS doesn't support tests, just do a build.
-test-xcode-watchOS-release:
-	xcodebuild -project SwiftProtobuf.xcodeproj \
-		-scheme SwiftProtobuf_watchOS \
-		-configuration Release \
-		build $(XCODEBUILD_EXTRAS)
+test-conformance: build check-for-protobuf-checkout Sources/Conformance/failure_list_swift.txt Sources/Conformance/text_format_failure_list_swift.txt
+	$(CONFORMANCE_TEST_RUNNER) \
+	  --enforce_recommended \
+	  --failure_list Sources/Conformance/failure_list_swift.txt \
+	  --text_format_failure_list Sources/Conformance/text_format_failure_list_swift.txt\
+	  $(SWIFT_CONFORMANCE_PLUGIN)
